@@ -88,7 +88,7 @@ p_speed = train %>%
 
 ggplotly(p_speed)
 
-## 
+#
 set.seed(1234)
 foo <- sample_n(train, 8e3)
 
