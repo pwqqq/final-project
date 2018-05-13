@@ -31,6 +31,29 @@ train %>%
   scale_x_log10() +
   scale_y_sqrt()
 
+###### plot all pickup locations
+min_lat <- 40.5774
+max_lat <- 40.9176
+min_long <- -74.15
+max_long <- -73.7004
+
+map1 <- ggplot(train, aes(x=pickup_longitude, y=pickup_latitude)) +
+  geom_point(size=0.06) +
+  scale_x_continuous(limits=c(min_long, max_long)) +
+  scale_y_continuous(limits=c(min_lat, max_lat))
+#png("map1.png", w=600, h=600)
+map1
+#dev.off()
+
+###### plot all dropoff locations
+map2 <- ggplot(train, aes(x=dropoff_longitude, y=dropoff_latitude)) +
+  geom_point(size=0.06) +
+  scale_x_continuous(limits=c(min_long, max_long)) +
+  scale_y_continuous(limits=c(min_lat, max_lat))
+#png("map2.png", w=600, h=600)
+map2
+#dev.off()
+
 ###### split date and time 
 pickup = stringr::str_split(train$pickup_datetime, ' ')
 pick_up = data.frame(matrix(unlist(pickup), ncol = 2, byrow=T))
@@ -88,12 +111,18 @@ p_speed = train %>%
 
 ggplotly(p_speed)
 
-#
+# the pickup location with color changing based on average speed
 set.seed(1234)
+## select a sample of 8000
 foo <- sample_n(train, 8e3)
 
-leaflet(data = foo) %>% 
-  addProviderTiles("Esri.NatGeoWorldMap") %>%
-  addCircleMarkers(~ pickup_longitude, ~ pickup_latitude, radius = 1,
-                   color = speed, fillOpacity = 0.3)  
-
+#plotly mapbox
+Sys.setenv('MAPBOX_TOKEN' = 'pk.eyJ1IjoiZmZmcmV5YSIsImEiOiJjamg1ZGFrMzIwMHc4MnZwbGU0bDNnaHBlIn0.DFNaPWfAO2wa9wZUNfzLYQ')
+foo %>%
+  plot_mapbox(lat = ~pickup_latitude, lon = ~pickup_longitude, size=2,
+              mode = 'scattermapbox', hoverinfo='speed',text = ~speed) %>%
+  add_markers(color=~speed, size= I(5), colors = colorRampPalette(c("yellow", "red"))(100)) %>%
+  layout(mapbox = list(style = 'light',
+                       zoom = 9,
+                       center = list(lat = ~median(pickup_latitude),
+                                     lon = ~median(pickup_longitude))))
