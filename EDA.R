@@ -5,9 +5,17 @@ library(dplyr)
 library(Rmisc)
 library(plotly)
 library(tidyverse)
+library(lubridate)
 
 
-train = fread('train_taxi.csv')
+#train = fread('train_taxi.csv')
+train=fread("train.csv")
+
+train <- train %>%
+  mutate(pickup_datetime = ymd_hms(pickup_datetime),
+         dropoff_datetime = ymd_hms(dropoff_datetime),
+         vendor_id = factor(vendor_id),
+         passenger_count = factor(passenger_count))
 
 summary(train)
 
@@ -29,6 +37,30 @@ train %>%
   geom_histogram(bins = 150) +
   scale_x_log10() +
   scale_y_sqrt()
+
+###### plot all pickup locations
+min_lat <- 40.5774
+max_lat <- 40.9176
+min_long <- -74.15
+max_long <- -73.7004
+
+map1 <- ggplot(train, aes(x=pickup_longitude, y=pickup_latitude)) +
+  geom_point(size=0.06) +
+  scale_x_continuous(limits=c(min_long, max_long)) +
+  scale_y_continuous(limits=c(min_lat, max_lat))
+#png("map1.png", w=600, h=600)
+map1
+#dev.off()
+
+###### plot all dropoff locations
+map2 <- ggplot(train, aes(x=dropoff_longitude, y=dropoff_latitude)) +
+  geom_point(size=0.06) +
+  scale_x_continuous(limits=c(min_long, max_long)) +
+  scale_y_continuous(limits=c(min_lat, max_lat))
+#png("map2.png", w=600, h=600)
+map2
+#dev.off()
+
 
 ###### split date and time 
 pickup = stringr::str_split(train$pickup_datetime, ' ')
