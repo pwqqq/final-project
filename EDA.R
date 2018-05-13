@@ -97,13 +97,3 @@ leaflet(data = foo) %>%
   addCircleMarkers(~ pickup_longitude, ~ pickup_latitude, radius = 1,
                    color = speed, fillOpacity = 0.3)  
 
-library(sp)
-library(ggmap)
-demo(meuse, ask=FALSE, echo = FALSE)
-merc = CRS("+init=epsg:3857")
-WGS84 = CRS("+init=epsg:4326")
-meuse = spTransform(meuse, WGS84)
-
-bgMap = get_map(as.vector(bbox(meuse)), source = "google", zoom = 13) 
-
-plot(spTransform(meuse, merc), bgMap = bgMap, pch = 16, cex = .5)
