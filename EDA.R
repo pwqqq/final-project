@@ -119,10 +119,27 @@ foo <- sample_n(train, 8e3)
 #plotly mapbox
 Sys.setenv('MAPBOX_TOKEN' = 'pk.eyJ1IjoiZmZmcmV5YSIsImEiOiJjamg1ZGFrMzIwMHc4MnZwbGU0bDNnaHBlIn0.DFNaPWfAO2wa9wZUNfzLYQ')
 foo %>%
-  plot_mapbox(lat = ~pickup_latitude, lon = ~pickup_longitude, size=2,
+  plot_mapbox(lat = ~pickup_latitude, lon = ~pickup_longitude,
               mode = 'scattermapbox', hoverinfo='speed',text = ~speed) %>%
-  add_markers(color=~speed, size= I(5), colors = colorRampPalette(c("yellow", "red"))(100)) %>%
+  add_markers(color=~speed, size= I(4), colors = colorRampPalette(c("yellow", "red"))(100)) %>%
   layout(mapbox = list(style = 'light',
                        zoom = 9,
                        center = list(lat = ~median(pickup_latitude),
                                      lon = ~median(pickup_longitude))))
+
+## the pick-up locations of two vendors
+foo %>%
+  plot_mapbox(lat = ~pickup_latitude, lon = ~pickup_longitude, split = ~vendor_id,
+              mode = 'scattermapbox', hoverinfo='speed',text = ~vendor_id) %>%
+  add_markers(alpha = 0.5) %>%
+  layout(mapbox = list(style = 'light',
+                      zoom = 9,
+                      center = list(lat = ~median(pickup_latitude),
+                                    lon = ~median(pickup_longitude))))
+
+## the speed comparison of two vendors
+train %>%
+  group_by(vendor_id) %>%
+  plot_ly(y = ~speed, alpha = 0.1) %>%
+  add_boxplot(x = ~vendor_id) %>%
+  layout(yaxis = list(range= c(0,9285.227)))
