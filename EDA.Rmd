@@ -35,6 +35,7 @@ library(tidyverse)
 
 
 ## 1.2 Load data
+The datasets are published on Kaggle by the NYC Taxi and Limousine Commission. There are 1,458,644 observations in the train dataset and 625,134 observations in the test dataset. The train dataset includes 11 variables such as id, vendor_id and so on. Two variables, dropoff_datetime and trip_duration which show up in the train dataset are withheld in the test dataset. Our goal is to predict the trip durations.
 ```{r}
 train = fread('train_taxi.csv')
 test = fread('test_taxi.csv')
