@@ -1,0 +1,503 @@
+---
+title: "FinalProjVersion1.1"
+author: "Annie Yang"
+date: "5/15/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(lubridate)
+library(geosphere)
+library(forcats)
+library(xgboost)
+library(caret)
+library(pROC)
+library(Matrix)
+library(MLmetrics)
+library(neuralnet)
+library(stringr)
+library(plotly)
+```
+
+```{r}
+# Import dataset
+train <- fread("train.csv")
+test <- fread("test.csv")
+
+combine <- bind_rows(train %>% mutate(dset = "train"), 
+                     test %>% mutate(dset = "test",
+                                     dropoff_datetime = NA, # test data doesn't have dropoff_datetime and trip duration columns
+                                     trip_duration = NA))
+
+combine <- combine %>% mutate(dset = factor(dset))
+
+# Change date type
+train <- train %>%
+  mutate(pickup_datetime = ymd_hms(pickup_datetime),
+         dropoff_datetime = ymd_hms(dropoff_datetime),
+         vendor_id = factor(vendor_id),
+         passenger_count = factor(passenger_count))
+```
+
+```{r}
+# Check missing values
+sum(is.na(train))
+sum(is.na(test))
+```
+
+```{r}
+# Got JFK and La Guardia airport coodinates from Wikepedia
+
+jfk_coord <- tibble(lon = -73.778889, lat = 40.639722)
+la_guardia_coord <- tibble(lon = -73.872611, lat = 40.77725)
+
+pick_coord <- train %>%
+  dplyr::select(pickup_longitude, pickup_latitude)
+drop_coord <- train %>%
+  dplyr::select(dropoff_longitude, dropoff_latitude)
+
+# Calculate direct distance of the trip: minimum possible travel distance
+train$dist <- distCosine(pick_coord, drop_coord)
+train$bearing = bearing(pick_coord, drop_coord)
+
+train$jfk_dist_pick <- distCosine(pick_coord, jfk_coord)
+train$jfk_dist_drop <- distCosine(drop_coord, jfk_coord)
+
+train$lg_dist_pick <- distCosine(pick_coord, la_guardia_coord)
+train$lg_dist_drop <- distCosine(drop_coord, la_guardia_coord)
+```
+
+
+```{r}
+# train station and bus station are quite near each other
+train_coord <- tibble(lon = -73.993584, lat = 40.750580)
+bus_coord <- tibble(lon = -73.9903, lat = 40.7569)
+
+train$t_dist_pick <- distCosine(pick_coord, train_coord)
+train$t_dist_drop <- distCosine(drop_coord, train_coord)
+
+train$b_dist_pick <- distCosine(pick_coord, bus_coord)
+train$b_dist_drop <- distCosine(drop_coord, bus_coord)
+```
+
+```{r}
+train <- train %>%
+  mutate(speed = dist/trip_duration*3.6,
+         date = date(pickup_datetime),
+         month = as.integer(month(pickup_datetime)),
+         wday = wday(pickup_datetime, label = TRUE),
+         wday = as.integer(fct_relevel(wday, c("Mon", "Tues", "Wed", "Thurs", "Fri", "Sat", "Sun"))),
+         hour = hour(pickup_datetime),
+         work = as.integer((hour %in% seq(8,18)) & (wday %in% c(1:5))),
+         jfk_trip = (jfk_dist_pick < 2e3) | (jfk_dist_drop < 2e3),
+         lg_trip = (lg_dist_pick < 2e3) | (lg_dist_drop < 2e3),
+         t_trip = (t_dist_pick < 5e2) | (t_dist_drop < 5e2),
+         b_trip = (b_dist_pick < 2e2) | (b_dist_drop < 2e2),
+         blizzard = !( (date < ymd("2016-01-22") | (date > ymd("2016-01-29"))) )
+        )
+  
+train$month <- as.factor(train$month)# there are 6 months
+train$wday <- as.factor(train$wday)
+#which( colnames(train)=="speed" )
+```
+
+
+```{r}
+filter_data <- train%>%
+  filter(trip_duration < 22*3600,
+         dist > 0 | (near(dist, 0) & trip_duration < 60),
+         jfk_dist_pick < 3e5 & jfk_dist_drop < 3e5,
+         trip_duration > 10,
+         speed < 100)
+################ Cluster by pickup frequency ####################
+Fcluster <- kmeans(filter_data[,6:7],10,nstart = 20,algorithm = "MacQueen",iter.max=100)
+#Change algorithm to converge
+filter_data$pcluster <- as.factor(Fcluster[["cluster"]])
+
+#Calculate pickup frequency
+freq_table <- filter_data %>% 
+  group_by(pcluster) %>% 
+  summarise(freq=n()) %>%
+  mutate(prob = round(freq/sum(freq),3))
+
+################ Cluster by dropoff frequency ####################
+Fcluster2 <- kmeans(filter_data[,8:9],10,nstart = 20,algorithm = "MacQueen",iter.max=200)
+#Change algorithm to converge
+filter_data$dcluster <- as.factor(Fcluster2[["cluster"]])
+
+freq_table2 <- filter_data %>% 
+  group_by(dcluster) %>% 
+  summarise(freq2=n()) %>%
+  mutate(prob2 = round(freq2/sum(freq2),3))
+
+merge_df <- merge(filter_data,freq_table,by="pcluster")
+merge_df <- merge(merge_df,freq_table2,by="dcluster")
+# Sample 
+sample <- merge_df%>%
+  sample_n(5e3)
+
+################## Cluster map ###################
+# Pickup cluster
+ggplot(sample,aes(pickup_longitude, pickup_latitude, color = pcluster))+
+  geom_point(size=0.1, alpha = 0.5) +
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))
+
+# Dropoff cluster
+ggplot(sample, aes(dropoff_longitude, dropoff_latitude, color = dcluster))+
+  geom_point(size=0.2, alpha = 0.5) +
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))
+
+################## Vendor #####################
+sample%>%
+  filter(vendor_id ==1)%>%
+  ggplot(aes(pickup_longitude, pickup_latitude, color = pcluster))+
+  geom_point(size=0.1, alpha = 0.5) +
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))
+
+sample%>%
+  filter(vendor_id ==2)%>%
+  ggplot(aes(pickup_longitude, pickup_latitude, color = pcluster))+
+  geom_point(size=0.1, alpha = 0.5) +
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))
+```
+
+##Analyze interaction
+```{r}
+sample_int <- sample%>%
+  filter(trip_duration<20000)
+
+ggplot(sample_int) +
+  aes(x = dist, y = trip_duration, color = pcluster) +
+  geom_smooth(method = "lm",size = 0.5, se=FALSE)
+
+ggplot(sample_int) +
+  aes(x = dist, y = trip_duration, color = dcluster) +
+  geom_smooth(method = "lm",size = 0.5, se=FALSE)
+
+## interaction with work
+ggplot(sample_int) +
+  aes(x = dist, y = trip_duration, color = as.factor(work)) +
+  geom_smooth(method = "lm",size = 0.5, se=FALSE)
+
+merge_df<-merge_df%>%
+  mutate(interact = prob2*dist)
+
+```
+
+
+##Analyze speed
+```{r}
+pick_good <- train%>%
+  filter(trip_duration < 22*3600,
+         dist > 0 | (near(dist, 0) & trip_duration < 60),
+         jfk_dist_pick < 3e5 & jfk_dist_drop < 3e5,
+         trip_duration > 10,
+         speed < 100)%>%
+  sample_n(5e3)
+
+Scluster <- kmeans(pick_good[,22],4,nstart = 20)
+
+a <- Scluster[["cluster"]]
+
+pick_good$cluster <- as.factor(a)
+
+# The pickup locations seem to be more concentrated than dropoff locations
+ggplot(pick_good, aes(pickup_longitude, pickup_latitude, color = cluster)) + 
+  geom_point(size=0.1, alpha = 0.5) +
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))
+
+ggplot(pick_good, aes(dropoff_longitude, dropoff_latitude, color = cluster)) + 
+  geom_point(size=0.1, alpha = 0.5) +
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))
+
+# Which part has the fastest speed
+
+p <- ggplot(pick_good, aes(x=pickup_longitude, y=pickup_latitude,color=cluster)) + 
+  geom_point(size=0.1, alpha = 0.5)+
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))+
+  facet_wrap( ~cluster)
+
+#devtools::install_github('hadley/ggplot2')
+
+ggplotly(p)
+
+p2 <- ggplot(pick_good, aes(x=dropoff_longitude, y=dropoff_latitude,color=cluster)) + 
+  geom_point(size=0.1, alpha = 0.5)+
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))+
+  facet_wrap( ~cluster)
+
+ggplotly(p2)
+
+# People go to different places on work days and non-work days
+p3 <- ggplot(pick_good, aes(x=dropoff_longitude, y=dropoff_latitude,color=work)) + 
+  geom_point(size=0.1, alpha = 0.5)+
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))+
+  facet_wrap( ~work)
+
+ggplotly(p3)
+```
+
+```{r}
+merge_df %>%
+  group_by(wday, pcluster) %>%
+  summarise(median_speed = median(speed)) %>%
+  ggplot(aes(pcluster, wday, fill = median_speed)) +
+  geom_tile() +
+  labs(x = "pcluster", y = "Day of the week") +
+  scale_fill_distiller(palette = "Spectral")
+
+merge_df %>%
+  group_by(wday, dcluster) %>%
+  summarise(median_speed = median(speed)) %>%
+  ggplot(aes(dcluster, wday, fill = median_speed)) +
+  geom_tile() +
+  labs(x = "dcluster", y = "Day of the week") +
+  scale_fill_distiller(palette = "Blues")
+
+p <- plot_ly(sample, x = ~speed, color = ~pcluster, type = "box")
+p
+
+p2 <- plot_ly(sample, x = ~speed, color = ~wday, type = "box")
+p2
+
+p3 <- plot_ly(sample, x = ~speed, color = ~month, type = "box")
+p3
+
+```
+
+
+####Analyze transportation station
+```{r}
+##################### TRAIN STATION #######################
+train %>%
+  filter(trip_duration < 23*3600) %>%
+  ggplot(aes(t_trip, trip_duration, color = t_trip)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  labs(x = "train trip")
+
+train %>%
+  ggplot(aes(t_dist_pick)) +
+  geom_histogram(bins = 30, fill = "red") +
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 5e2) +
+  labs(x = "t pickup distance")
+
+##################### BUS STATION #######################
+train %>%
+  filter(trip_duration < 23*3600) %>%
+  ggplot(aes(b_trip, trip_duration, color = b_trip)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  labs(x = "bus trip")
+
+train %>%
+  ggplot(aes(b_dist_pick)) +
+  geom_histogram(bins = 30, fill = "red") +
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e2) +
+  labs(x = "t pickup distance")
+
+##################### AIRPORT STATION #######################
+train %>%
+  filter(trip_duration < 23*3600) %>%
+  ggplot(aes(jfk_trip, trip_duration, color = jfk_trip)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  labs(x = "JFK trip")
+
+train %>%
+  ggplot(aes(jfk_dist_pick)) +
+  geom_histogram(bins = 30, fill = "red") +
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e3) +
+  labs(x = "JFK pickup distance")
+```
+
+
+####Analyze weather
+```{r}
+weather <- fread("weather.csv")
+
+weather <- weather %>%
+  mutate(date = dmy(date),
+         rain = as.numeric(ifelse(precipitation == "T", "0.01", precipitation)),
+         s_fall = as.numeric(ifelse(`snow fall` == "T", "0.01", `snow fall`)),
+         s_depth = as.numeric(ifelse(`snow depth` == "T", "0.01", `snow depth`)),
+         all_precip = s_fall + rain,
+         has_snow = (s_fall > 0) | (s_depth > 0),
+         has_rain = rain > 0,
+         max_temp = `maximum temperature`,
+         min_temp = `minimum temperature`,
+         avg_temp = `average temperature`)
+
+```
+
+#####Analyze temperature
+```{r}
+Wtrain <- left_join(merge_df,weather,by = "date")
+
+Wtrain %>%
+  group_by(date) %>%
+  summarise(mean_temp = mean(avg_temp)) %>%
+  ggplot(aes(date, mean_temp)) +
+  geom_line(color = "orange", size = 1.5) +
+  labs(x = "Date", y = "Average temperature")
+
+
+Wtrain %>%
+  group_by(date) %>%
+  summarise(diff_temp = mean(max_temp-min_temp)) %>%
+  ggplot(aes(date, diff_temp)) +
+  geom_line(color = "blue", size = 1.5) +
+  labs(x = "Date", y = "Temperature Diff")
+
+Wtrain %>%
+  group_by(date,pcluster) %>%
+  summarise(duration = mean(trip_duration),
+            mean_temp = mean(avg_temp)) %>%
+  ggplot(aes(mean_temp, duration, color = pcluster)) +
+  geom_jitter(width = 0.04, size = 0.5) +
+  geom_smooth(size = 0.5,se =F)+
+  theme_bw()+
+  scale_x_sqrt() +
+  scale_y_log10() +
+  labs(x = "Average temperature", y = "Average trip duration")
+
+Wtrain %>%
+  group_by(date,dcluster) %>%
+  summarise(duration = mean(trip_duration),
+            mean_temp = mean(avg_temp)) %>%
+  ggplot(aes(mean_temp, duration, color = dcluster)) +
+  geom_jitter(width = 0.04, size = 0.5) +
+  geom_smooth(size = 0.5,se =F)+
+  theme_bw()+
+  scale_x_sqrt() +
+  scale_y_log10() +
+  labs(x = "Average temperature", y = "Average trip duration")
+
+Wtrain %>%
+  group_by(date) %>%
+  summarise(duration = mean(trip_duration),
+            mean_temp = mean(avg_temp)) %>%
+  ggplot(aes(mean_temp, duration)) +
+  geom_jitter(width = 0.04, size = 0.5) +
+  geom_smooth(size = 0.5,se =F)+
+  theme_bw()+
+  labs(x = "Average temperature", y = "Average trip duration")
+
+```
+
+
+####Analyze fastest route
+```{r}
+f1 <- fread("fastest_routes_train_part_1.csv")
+f2 <- fread("fastest_routes_train_part_2.csv")
+ft <- fread("fastest_routes_test.csv")
+fastest_route <- bind_rows(f1, f2, ft)
+```
+
+
+```{r}
+fast <- fastest_route %>%
+  select(id, total_distance, total_travel_time, number_of_steps,
+         step_direction, step_maneuvers) %>%
+  mutate(fastest_speed = total_distance/total_travel_time*3.6,
+         left_turns = str_count(step_direction, "left"),
+         right_turns = str_count(step_direction, "right"),
+         turns = str_count(step_maneuvers, "turn")
+         ) %>%
+  select(-step_direction, -step_maneuvers)
+
+Ftrain <- left_join(Wtrain, fast, by = "id") %>%
+  mutate(fast_speed_trip = total_distance/trip_duration*3.6)%>%
+  mutate(log_duration = log(trip_duration + 1))
+```
+
+
+```{r}
+x<- Ftrain%>%
+  dplyr::select(vendor_id, passenger_count, dist, pickup_longitude,
+         pickup_latitude,dropoff_longitude,dropoff_latitude,
+         month,wday,hour,work,jfk_trip,lg_trip,blizzard,
+         prob,prob2,interact,t_trip, b_trip,
+         avg_temp,has_snow,
+         total_travel_time, total_distance,log_duration) 
+x <- model.matrix(~.,data = x)[,-1]
+y <- x[,ncol(x)]
+x <- x[,-ncol(x)]
+
+#################### Train and Test #######################
+#For regression, the function determines the quartiles of the data set and samples within those groups
+#Train and test are similar in distribution。 In cases where the outcome is numeric, the samples are split into quartiles and the sampling is done within each quartile
+train_rows <- createDataPartition(y, p = 2/3, list = FALSE) #Improve: instead of using sample
+train_rows <- as.integer(train_rows)
+x.train <- x[train_rows,]
+x.test <- x[-train_rows,]
+
+y.train <- y[train_rows]
+y.test <- y[-train_rows]
+
+dtrain <- xgb.DMatrix(data = x.train, label = y.train)
+dtest <- xgb.DMatrix(data = x.test, label = y.test)
+
+xgb_params <- list(colsample_bytree = 0.7, #variables per tree 
+                   subsample = 0.7, #data subset per tree 
+                   booster = "gbtree",
+                   max_depth = 5, #tree levels
+                   eta = 0.3, #shrinkage
+                   eval_metric = "rmse", 
+                   objective = "reg:linear",
+                   seed = 4321
+                   )
+
+xgb.t <- xgb.train (params = xgb_params, data = dtrain, nrounds = 100, watchlist = list(val=dtest,train=dtrain), print_every_n = 5, maximize = F)
+
+### Check rmse on test data
+pred.t <- predict(xgb.t,x.test)
+RMSE(pred.t,y.test) # 0.3574891
+```
+
+```{r}
+#bootControl <- trainControl(number = 200)
+#svmFit <- train(x.train, y.train,
+#method = "svmRadial", tuneLength = 5,
+#trControl = bootControl, scaled = FALSE)
+```
+
+
+```{r}
+
+els.mod.train <- cv.glmnet(x.train, y.train, alpha = 0.5)
+bestlam_els <- els.mod.train$lambda.min
+preds_els <- predict(els.mod.train, s = bestlam_els, newx=x.test)
+RMSE(y.test, preds_els) # 0.46
+
+lasso.mod.train <- cv.glmnet(x.train, y.train, alpha = 1)
+bestlam_lasso <- lasso.mod.train$lambda.min
+preds_l <- predict(lasso.mod.train, s = bestlam_lasso, newx=x.test)
+RMSE(y.test, preds_l) # 0.46
+
+ridge.mod.train <- cv.glmnet(x.train, y.train, alpha = 0)
+bestlam_ridge <- ridge.mod.train$lambda.min
+preds_r <- predict(ridge.mod.train, s = bestlam_ridge, newx=x.test)
+RMSE(y.test, preds_r) # 0.4789906
+
+plot(els.mod.train,xvar="lambda",label=TRUE)
+plot(lasso.mod.train,xvar="lambda",label=TRUE)
+plot(ridge.mod.train,xvar="lambda",label=TRUE)
+```
+
