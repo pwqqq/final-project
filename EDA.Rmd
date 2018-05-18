@@ -19,6 +19,13 @@ author <- function(){
 
 ***
 ## 1 Backgroud
+The NYC Taxis are widely recognozied as icons of the city because New York city is a compact city with large population, and driving is expensive and time-consuming there. Although the public transportation is extensive and complete in NYC, the stations are fixed which may be far away from passengers' points of departure and destinations. Hence, it is convenient and economical for people to travel by taxi in NYC.
+
+With the development of technology, people start to call taxi on mobile apps like Uber instead of calling the taxi service over phone. One of the most important reason is that customers can see the estimated trip durations and expenses instantly on the app after inputing pickup time and locations, and destinations. To improve the competance of their apps in the market, taxi companies concentrate on increasing the accuracy of estimated trip duration and expense. The trip duration is essential because expense is produced based on duration and distance, and distance between two locations on the same route is unchanged. 
+
+As a result, we decide to choose the NYC Taxi Trip Duration competition on Kaggle as our final project because the data is from the real world, and the predictions are useful and meaningful. 
+
+As the data is published on Kaggle, there are some previous discussions and kernals on the website. We take these valuable work as references. 
 
 ### 1.1 Import packages
 ```{r}
