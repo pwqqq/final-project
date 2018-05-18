@@ -78,8 +78,9 @@ In this section we will begin by having a look at the distributions of the indiv
 
 We start with a map of the pick-up locations of the taxis. The density of the green color shows the frequency of the pick-up coordinates. In this map you can zoom and pan through the pickup locations. 
 
-It is clealy shown on the plot that most pick-up coordinates are whithin Manhattan area. Another two notable hot-spots are LGA and JFK airport towards the south-east of the city.
+It is clealy shown on the plot that most pick-up coordinates are whithin Manhattan area. Another two notable hot-spots are LGA and JFK airport towards the south-east of the city. If we plot all the points on blank canvas, we can see a rough map of Manhattan area, which suggests the data is comprehensive, meaningful, and applicable.
 ```{r}
+Sys.setenv('MAPBOX_TOKEN'="pk.eyJ1IjoibGlzaGF3IiwiYSI6ImNqaGJpdG90MzAyYjYzMG82ODhwa3o2YjEifQ.PUvt23cAai97qrBbLm7m5g")
 set.seed(1234)
 ## select a sample of 8000
 foo <- sample_n(train, 8e3)
