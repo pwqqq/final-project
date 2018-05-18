@@ -1,0 +1,680 @@
+---
+title: "FP1.3"
+author: "Annie Yang"
+date: "5/18/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE, fig.width=6, fig.height=4)
+```
+
+```{r,include = FALSE}
+library(ggplot2)
+library(plotly)
+library(gridExtra)
+library(dplyr)
+library(data.table)
+library(lubridate)
+library(geosphere)
+library(forcats)
+library(xgboost)
+library(caret)
+library(Matrix)
+library(MLmetrics)
+library(stringr)
+library(knitr)
+library(kableExtra)
+library(parallel)
+library(parallelMap) 
+```
+
+```{r}
+# Import dataset
+train <- fread("train.csv")
+test <- fread("test.csv")
+
+combine <- bind_rows(train %>% mutate(dset = "train"), 
+                     test %>% mutate(dset = "test",
+                                     dropoff_datetime = NA, # test data doesn't have dropoff_datetime 
+                                                            #and trip duration columns
+                                     trip_duration = NA))
+
+combine <- combine %>% mutate(dset = factor(dset))
+
+# Change date type
+combine <- combine %>%
+  mutate(pickup_datetime = ymd_hms(pickup_datetime),
+         dropoff_datetime = ymd_hms(dropoff_datetime),
+         vendor_id = factor(vendor_id),
+         passenger_count = factor(passenger_count))
+```
+
+```{r}
+# Check missing values
+sum(is.na(train))
+sum(is.na(test))
+```
+
+###Analyze transport hubs
+
+Since transport hubs are usually hot spots in a city. It may well provide useful information when we predict trip duration, and improve prediction performance. We created new predictors based on the variables provided in the raw dataset.
+
+#### Airports
+Airports are not in the city center, so it may provide useful information when we predict long trip durations. Refering to prior work, we analyzed whether there is a significant difference between airports trip and non-airports trip.
+
+#### Train and bus station
+Extending previous work on this problem, besides considering airport, we also analyzed the train station (Penn Station) and bus station (Port Authority Bus Terminal).In contrast to the airports, the train and bus station are in the city center. It could be a useful predictor for shorter trip duration.
+
+**Step:**
+
+1. Get coordinates of transport hubs
+    +JFK airport: longitude = -73.778889, latitude = 40.639722
+    +La Guardia airport: longitude = -73.872611, latitude = 40.77725
+    +train station (Penn Station): longitude = -73.993584, latitude = 40.750580
+    +bus station (Port Authority Bus Terminal): longitude = -73.9903, latitude = 40.7569
+    
+2. Calculate direct distance from pickup and dropoff location to transport hubs.
+
+3. Choose thresholds: based on step2, we used histogram to choose thresholds, and define transport hubs trip. If distance < thresholds, we defined it as a transport hubs trip (labeled as TRUE). Note that the thresholds are different for these transportation station trips. We choose the thresholds through the histogram graphs.
+
+4. Add new predictors: we created indicators corresponding to thresholds from step3.
+
+```{r}
+# Got JFK and La Guardia airport coodinates
+jfk_coord <- tibble(lon = -73.778889, lat = 40.639722)
+la_guardia_coord <- tibble(lon = -73.872611, lat = 40.77725)
+
+pick_coord <- combine %>%
+  dplyr::select(pickup_longitude, pickup_latitude)
+drop_coord <- combine %>%
+  dplyr::select(dropoff_longitude, dropoff_latitude)
+
+# Calculate direct distance of the trip: minimum possible travel distance
+combine$dist <- distCosine(pick_coord, drop_coord)
+combine$bearing <- bearing(pick_coord, drop_coord)
+
+combine$jfk_dist_pick <- distCosine(pick_coord, jfk_coord)
+combine$jfk_dist_drop <- distCosine(drop_coord, jfk_coord)
+
+combine$lg_dist_pick <- distCosine(pick_coord, la_guardia_coord)
+combine$lg_dist_drop <- distCosine(drop_coord, la_guardia_coord)
+```
+
+
+```{r}
+# train station and bus station are quite near each other
+train_coord <- tibble(lon = -73.993584, lat = 40.750580)
+bus_coord <- tibble(lon = -73.9903, lat = 40.7569)
+
+combine$t_dist_pick <- distCosine(pick_coord, train_coord)
+combine$t_dist_drop <- distCosine(drop_coord, train_coord)
+
+combine$b_dist_pick <- distCosine(pick_coord, bus_coord)
+combine$b_dist_drop <- distCosine(drop_coord, bus_coord)
+```
+
+#### Choose Thresholds
+```{r}
+train <- combine%>%
+  filter(dset=="train")
+##################### JFK AIRPORT #######################
+PJFK1 <- train %>%
+  ggplot(aes(jfk_dist_pick)) +
+  geom_histogram(bins = 30, fill = "light blue") +
+  theme_bw()+
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e3) +
+  labs(x = "JFK pickup distance")
+
+PJFK2 <- train %>%
+  ggplot(aes(jfk_dist_drop)) +
+  geom_histogram(bins = 30, fill = "light blue") +
+  theme_bw()+
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e3) +
+  labs(x = "JFK dropoff distance")
+
+#grid.arrange(PJFK1, PJFK2, nrow = 1)
+
+##################### La Guardia AIRPORT #######################
+PLG1 <- train %>%
+  ggplot(aes(lg_dist_pick)) +
+  geom_histogram(bins = 30, fill = "light green") +
+  theme_bw()+
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e3) +
+  labs(x = "La Guardia pickup distance")
+
+PLG2 <- train %>%
+  ggplot(aes(lg_dist_drop)) +
+  geom_histogram(bins = 30, fill = "light green") +
+  theme_bw()+
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e3) +
+  labs(x = "La Guardia distance")
+
+#grid.arrange(PLG1, PLG2, nrow = 1)
+##################### TRAIN STATION #######################
+Ptrain1 <- train %>%
+  ggplot(aes(t_dist_pick)) +
+  geom_histogram(bins = 30, fill = "pink") +
+  theme_bw()+
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 5e2) +
+  labs(x = "train station pickup distance")
+
+Ptrain2 <- train %>%
+  ggplot(aes(t_dist_drop)) +
+  geom_histogram(bins = 30, fill = "pink") +
+  theme_bw()+
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 5e2) +
+  labs(x = "train station dropoff distance")
+
+#grid.arrange(Ptrain1, Ptrain2, nrow = 1)
+##################### BUS STATION #######################
+Pbus1 <- train %>%
+  ggplot(aes(b_dist_pick)) +
+  geom_histogram(bins = 30, fill = "orange") +
+  theme_bw()+
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e2) +
+  labs(x = "bus station pickup distance")
+
+Pbus2 <- train %>%
+  ggplot(aes(b_dist_drop)) +
+  geom_histogram(bins = 30, fill = "orange") +
+  theme_bw()+
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e2) +
+  labs(x = "bus station dropoff distance")
+
+#grid.arrange(Pbus1, Pbus2, nrow = 1)
+
+layout <- matrix(1:8,4,2,byrow = TRUE)
+grid.arrange(PJFK1, PJFK2, PLG1, PLG2, Ptrain1, Ptrain2, Pbus1, Pbus2,  layout_matrix = layout)
+```
+
+From the histogram of 4 transport hubs, we got thresholds for defining transport hubs trip. Because airports are far from the center of NEW YORK, the threshold for airports is larger than that of train and bus station.
+
+Station | Threshold (meter)
+------------- | -------------
+JFK | 2000
+LG | 2000 
+TRAIN | 500 
+BUS | 200 
+
+```{r}
+# Add transportation station trip indicator 
+combine <- combine %>%
+  mutate(
+         jfk_trip = (jfk_dist_pick < 2e3) | (jfk_dist_drop < 2e3),
+         lg_trip = (lg_dist_pick < 2e3) | (lg_dist_drop < 2e3),
+         t_trip = (t_dist_pick < 5e2) | (t_dist_drop < 5e2),
+         b_trip = (b_dist_pick < 2e2) | (b_dist_drop < 2e2)
+        )
+```
+
+Then we use boxplots to check if there is significant difference between trip duration of transport hubs trip and non-transport hubs trip.
+
+```{r}
+train <- combine%>%
+  filter(dset=="train")
+
+##################### JFK AIRPORT #######################
+JFKbox <- train %>%
+  filter(trip_duration < 23*3600) %>%
+  ggplot(aes(jfk_trip, trip_duration, color = jfk_trip)) +
+  geom_boxplot() +
+  theme_bw()+
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  labs(y= "Trip Duration", x = "JFK trip")
+
+#ggplotly(JFKbox)
+##################### La Guardia AIRPORT #######################
+LGbox <- train %>%
+  filter(trip_duration < 23*3600) %>%
+  ggplot(aes(lg_trip, trip_duration, color = lg_trip)) +
+  geom_boxplot() +
+  theme_bw()+
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  labs(y= "Trip Duration", x = "LG trip")
+
+#ggplotly(LGbox)
+##################### TRAIN STATION #######################
+Trainbox <- train %>%
+  filter(trip_duration < 23*3600) %>%
+  ggplot(aes(t_trip, trip_duration, color = t_trip)) +
+  geom_boxplot() +
+  theme_bw()+
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  labs(y= "Trip Duration", x = "train trip")
+
+#ggplotly(Trainbox)
+##################### BUS STATION #######################
+Busbox <- train %>%
+  filter(trip_duration < 23*3600) %>%
+  ggplot(aes(b_trip, trip_duration, color = b_trip)) +
+  geom_boxplot() +
+  theme_bw()+
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  labs(y= "Trip Duration", x = "bus trip")
+
+#ggplotly(Busbox)
+
+layout2 <- matrix(1:4,2,2,byrow = TRUE)
+grid.arrange(JFKbox, LGbox, Trainbox, Busbox, layout_matrix = layout2)
+
+```
+
+From boxplots, we find that the difference of trip duration between airport-trip and non-airport-trip is significant. 
+For the train and bus station trip, the median of trip duration is only slightly different, which is difficult to identify from the boxplots. However, the distribution of trip duration for the TRUE class is more concentrated. Also, from the interaction plots, the slopes are different, and trip duration of TRUE train or bus trip is shorter.
+
+
+```{r}
+## interaction with train and bus station
+int1 <- ggplot(train) +
+  aes(x = dist, y = trip_duration, color = b_trip) +
+  theme_bw()+
+  geom_smooth(method = "lm",size = 0.5, se=FALSE)
+
+int2 <- ggplot(train) +
+  aes(x = dist, y = trip_duration, color = t_trip) +
+  theme_bw()+
+  geom_smooth(method = "lm",size = 0.5, se=FALSE)
+
+layout3 <- matrix(1:2,1,2,byrow = TRUE)
+grid.arrange(int1,int2,layout_matrix = layout3)
+```
+
+Because transport hubs are hot spots in the city, we included these indicators in our model, and check if it makes a difference for the prediction accuracy.
+
+
+```{r}
+# Manipulate data 
+combine <- combine %>%
+  mutate(speed = dist/trip_duration*3.6,
+         date = date(pickup_datetime),
+         month = as.integer(month(pickup_datetime)),
+         wday = wday(pickup_datetime, label = TRUE),
+         wday = as.integer(fct_relevel(wday, c("Mon", "Tues", "Wed", "Thurs", "Fri", "Sat", "Sun"))),
+         hour = hour(pickup_datetime),
+         work = as.integer((hour %in% seq(8,18)) & (wday %in% c(1:5)))
+         #blizzard = !( (date < ymd("2016-01-22") | (date > ymd("2016-01-29"))) )
+        )
+  
+#combine$month <- as.factor(combine$month)# there are 6 months
+#combine$wday <- as.factor(combine$wday)
+```
+
+
+
+###Cluster
+####Analyze pickup and dropoff frequency
+We divide NEW YORK into 10 clusters by pickup location and dropoff location. And calculate the frequency of pickup or dropoff in each cluster. It is reasonable to assume that high frequency clusters are more likely to have a longer trip duration after controling for distance. Before clustering, we clean training dataset first to improve k-means performance.
+
+**Data Cleaning:**
+
+* First, only the trip durations that are shorter than 22\times 3600 are kept in the prediction, and the trip durations that last longer than that are deleted. 22 here represents the hour and 3600 represents the seconds per hour. The trip durations that are longer than that 22\times 3600 means that the person take the taxi for more than 22 hours, which is almost a whole day. This situation rarely happens, so we decide to consider these data as outliers or miss-recoded, and delete them.
+
+* Then, the distances that are near 0 and the trip durations that are fewer than 60 seconds are deleted. These conditions mean that the passenger actually does not take the taxi, or get off the car immediately. No matter for what reason, these data are not useful in prediction and could be outliers in the training process. 
+
+* Also, we can choose the distances that that are longer than 3e5 to the JFK airport as the trips that are related to airport and the city. We could filter the data that are less than 3e5 distance from the airport, and consider them as the trips that are near the airports. These chosen trips that have longer distance are considered as useful predictors for the longer trips.
+
+* The final cleaning would be choosing the trip durations that are longer than 10 seconds, and the speed that is less than 100. These are reasonable assumptions that are based on the real situations, and the miss-recorded data or very rare cases are deleted.
+
+
+```{r}
+# Data cleaning refers to Kaggle Kernel
+filter_test <- combine%>%
+  dplyr::filter(dset=="test")
+
+filter_train <- combine%>%
+  filter(trip_duration < 22*3600,
+         dist > 0 | (near(dist, 0) & trip_duration < 60),
+         jfk_dist_pick < 3e5 & jfk_dist_drop < 3e5,
+         trip_duration > 10,
+         speed < 100,dset =="train")
+
+filter_combine <- rbind(filter_train,filter_test)
+################ Cluster by pickup location ####################
+#Change arguments to converge
+Fcluster <- kmeans(filter_combine[,6:7],10,nstart = 20,algorithm = "MacQueen",iter.max=100)
+
+filter_combine$pcluster <- as.factor(Fcluster[["cluster"]])
+
+# Extract pickup cluster centers
+PU_center <-  Fcluster[["centers"]]
+
+#Calculate pickup frequency
+freq_table <- filter_combine %>% 
+  group_by(pcluster) %>% 
+  summarise(count1=n()) %>%
+  mutate(freq1 = round(count1/sum(count1),3))
+
+summary_table <- cbind(freq_table, PU_center)
+
+kable(summary_table, "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+################ Cluster by dropoff location ####################
+Fcluster2 <- kmeans(filter_combine[,8:9],10,nstart = 20,algorithm = "MacQueen",iter.max=200)
+
+filter_combine$dcluster <- as.factor(Fcluster2[["cluster"]])
+
+# Extract dropoff cluster centers
+DO_center <-  Fcluster2[["centers"]]
+
+freq_table2 <- filter_combine %>% 
+  group_by(dcluster) %>% 
+  summarise(count2=n()) %>%
+  mutate(freq2 = round(count2/sum(count2),3))
+
+summary_table2 <- cbind(freq_table2, DO_center)
+
+kable(summary_table2, "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+
+####CLUSTER MAP
+After clustering, we make cluster map to show the frequency of pickup and dropoff in different areas of NEW YORK. From cluster map, we find:
+
+Drop-off location are more scattered than pickup location.
+Light blue indicates more dropoff or pickup happened in that area.
+
+*Note:* to make the cluster map more clear, we sampled 5000 observations from the training dataset.
+
+```{r}
+############### mutate pickup and dropoff frequency to training dataset ###############
+merge_df <- merge(filter_combine,freq_table,by="pcluster")
+merge_df <- merge(merge_df,freq_table2,by="dcluster")
+
+# Sample 
+sample <- merge_df%>%
+  filter(dset=="train")%>%
+  sample_n(5e3)
+
+################## Cluster map ###################
+# Pickup cluster
+ggplot(sample,aes(pickup_longitude, pickup_latitude, color = freq1))+
+  geom_point(size=0.1, alpha = 0.5) +
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))
+
+# Dropoff cluster
+ggplot(sample, aes(dropoff_longitude, dropoff_latitude, color = freq2))+
+  geom_point(size=0.2, alpha = 0.5) +
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))
+```
+
+###INTERACTION BETWEEN FREQUENCY AND DISTANCE
+
+Since distance has large main effects for trip duration. It also tends to have large interactions. We assume the magnitude of its effect depend on the level of frequency. In the high frequency drop-off or pickup area, for one unit change in distance, the trip duration increases more compared to low frequency area.
+
+We make interaction plots to show this interaction effect. It is very clear that the lines are interecting with each other. So we included interaction terms in our prediction model.
+
+```{r}
+# interaction with pickup frequency
+int3 <- merge_df%>%
+  filter(dset=="train")%>%
+  ggplot(aes(x = dist, y = trip_duration, color = pcluster)) +
+  geom_smooth(method = "lm",size = 0.5, se=FALSE)+
+  theme_bw()
+# interaction with dropoff frequency
+int4 <- merge_df%>%
+  filter(dset=="train")%>%
+  ggplot(aes(x = dist, y = trip_duration, color = dcluster)) +
+  geom_smooth(method = "lm",size = 0.5, se=FALSE)+
+  theme_bw()
+
+# add interaction terms
+merge_df<-merge_df%>%
+  mutate(pinteract = freq1*dist,dinteract = freq2*dist)
+
+grid.arrange(int3,int4,layout_matrix = layout3)
+```
+
+### SPEED ANALYSIS
+Analyze the traffic condition in NEW YORK in different areas and different times. The fast speed route start from center of NEW YORK and end in somewhere far from center.
+
+```{r}
+merge_df_train <- merge_df%>%
+  filter(dset == "train")
+
+# Cluster by speed
+Scluster <- kmeans(merge_df_train[,29],4,nstart = 20)
+
+a <- Scluster[["cluster"]]
+scenter <- Scluster[["centers"]]
+speed_table <- cbind(c(1:4),scenter)
+colnames(speed_table) <- c("cluster", "speed center")
+
+kable(speed_table, "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+merge_df_train$scluster <- as.factor(a)
+
+sample2 <- merge_df_train%>%
+  sample_n(5e3)
+
+# Visualize cluster by speed
+speed1 <- ggplot(sample2, aes(x=pickup_longitude, y=pickup_latitude,color=scluster)) + 
+  geom_point(size=0.1, alpha = 0.5)+
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))+
+  facet_wrap( ~scluster)
+ggplotly(speed1)
+
+speed2 <- ggplot(sample2, aes(x=dropoff_longitude, y=dropoff_latitude,color=scluster)) + 
+  geom_point(size=0.1, alpha = 0.5)+
+  coord_cartesian(xlim = c(-74.02,-73.77), ylim = c(40.63,40.84))+
+  facet_wrap( ~scluster)
+ggplotly(speed2)
+
+```
+
+From the boxplots of different pickup clusters and dropoff clusters, we find that the speed is significantly different. Speed at different time is also different but not that significant compared to speed in different clusters.
+
+```{r}
+p1 <- plot_ly(sample2, x = ~speed, color = ~as.factor(pcluster), type = "box")
+p1
+
+p2 <- plot_ly(sample2, x = ~speed, color = ~as.factor(dcluster), type = "box")
+p2
+
+p3 <- plot_ly(sample2, x = ~speed, color = ~as.factor(wday), type = "box")
+p3
+
+p4 <- plot_ly(sample2, x = ~speed, color = ~as.factor(month), type = "box")
+p4
+```
+
+### External Datasets
+
+####Analyze weather
+
+Refering to prior work, we imported weather dataset, which collected from the National Weather Service, and did data manipulation before including weather information in our prediction model. Also, NYC was hit by a blizzard from 2016-01-22 to 2016-01-29. Since blizzard is an important factor affecting trip duration, we included it as a predictor. 
+```{r}
+weather <- fread("weather.csv")
+
+weather <- weather %>%
+  mutate(date = dmy(date),
+         rain = as.numeric(ifelse(precipitation == "T", "0.01", precipitation)),
+         s_fall = as.numeric(ifelse(`snow fall` == "T", "0.01", `snow fall`)),
+         s_depth = as.numeric(ifelse(`snow depth` == "T", "0.01", `snow depth`)),
+         all_precip = s_fall + rain,
+         has_snow = (s_fall > 0) | (s_depth > 0),
+         has_rain = rain > 0,
+         max_temp = `maximum temperature`,
+         min_temp = `minimum temperature`,
+         avg_temp = `average temperature`)
+
+Glimpse_weather <- head(weather)
+
+kable(Glimpse_weather, "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+merge_df <- merge_df%>%
+  mutate(blizzard = !( (date < ymd("2016-01-22") | (date > ymd("2016-01-29"))) ))
+```
+
+
+*Analyze temperature*
+
+We can see that there is a positive relationship between average trip duration and average temperature. We will treat temperature as a predictor.
+```{r}
+Wtrain <- left_join(merge_df,weather,by = "date")
+
+Wtrain %>%
+  group_by(date) %>%
+  summarise(mean_temp = mean(avg_temp)) %>%
+  ggplot(aes(date, mean_temp)) +
+  geom_line(color = "orange", size = 1.5) +
+  labs(x = "Date", y = "Average temperature")
+
+
+Wtrain %>%
+  group_by(date) %>%
+  summarise(diff_temp = mean(max_temp-min_temp)) %>%
+  ggplot(aes(date, diff_temp)) +
+  geom_line(color = "blue", size = 1.5) +
+  labs(x = "Date", y = "Temperature Diff")
+
+Wtrain %>%filter(dset=="train")%>%
+  group_by(date) %>%
+  summarise(duration = mean(trip_duration),
+            mean_temp = mean(avg_temp)) %>%
+  ggplot(aes(mean_temp, duration)) +
+  geom_jitter(width = 0.04, size = 0.5) +
+  geom_smooth(size = 0.5)+
+  theme_bw()+
+  labs(x = "Average temperature", y = "Average trip duration")
+
+```
+
+####Analyze fastest routes
+Refering to prior work, we imported another external data set which estimated the fastest routes for each trip provided by oscarleo using the the Open Source Routing Machine, OSRM, and did data manipulation. We compared the results between one with fastest route predictors and one without. Model performance got improved after adding the external information in the fastest route dataset.
+```{r}
+f1 <- fread("fastest_routes_train_part_1.csv")
+f2 <- fread("fastest_routes_train_part_2.csv")
+ft <- fread("fastest_routes_test.csv")
+fastest_route <- bind_rows(f1, f2, ft)
+```
+
+
+```{r}
+fast <- fastest_route %>%
+  select(id, total_distance, total_travel_time, number_of_steps,
+         step_direction, step_maneuvers) %>%
+  mutate(fastest_speed = total_distance/total_travel_time*3.6,
+         left_turns = str_count(step_direction, "left"),
+         right_turns = str_count(step_direction, "right"),
+         turns = str_count(step_maneuvers, "turn")
+         ) %>%
+  select(-step_direction, -step_maneuvers)
+
+# Combine train, weather, fastest_route datasets together.
+Ftrain <- left_join(Wtrain, fast, by = "id") %>%
+  mutate(fast_speed_trip = total_distance/trip_duration*3.6)%>%
+  mutate(log_duration = log(trip_duration + 1),interact3 = total_distance*freq1,interact4 = total_distance*freq2)
+```
+
+
+To test the validation of the parameters, we first treated the first 2/3 of the data as the training
+test and the rest as the test data to test the RMSE. 
+
+Refering to prior work, we replace the trip_duration with its logarithm. (The + 1 is added to avoid an undefined log(0))
+
+We treat month, wday, hour as continuous variables (integer) in stead of categorical varaibles. Because comparing the rmse on the test dataset, we obtained smaller rmse in the continuous condition.
+
+**IMPROVEMENT**
+
+1. In prior work, it included total_travel_time, total_distance, hour, dist, vendor_id, jfk_trip, lg_trip, wday, month, pickup_longitude, pickup_latitude, bearing, lg_dist_drop (we don't use lg_dist_drop in our prediction model, because it doesn't provide much more extra information) variables in the prediction model.
+
+Compared to prior work on this problem, we add additional predictors: 
+
+* dropoff_longitude,dropoff_latitude
+* t_trip: whether it is a train station trip
+* b_trip: whether it is a bus station trip
+* freq1: the frequency of pickup in the area
+* freq2: the frequency of dropoff in the area
+* pinteract: distance interacts with pickup frequency
+* dinteract: distance interacts with dropoff frequency
+* avg_temp: average temperature 
+* has_snow: whether it has snow 
+* blizzard
+
+We also add another 2 interaction terms:
+
+* interact3: total_distance (from the fastest route dataset) interacts with pickup frequency
+* interact4: total_distance (from the fastest route dataset) interacts with dropoff frequency
+
+2. Adjust the parameters in the xgboost model. 
+* add gamma = 5
+* change max_depth to 7
+* change nround to 150
+
+Compared to just using parameters provided in prior work, our model performance got improved. The rmse on the test dataset is 0.396623 in our refered kernel on Kaggle. After improvement, the rmse on the test dataset is 0.3381741 for our prediction model. So the improvement in the performance of xgboost model is significant.
+
+Note: the rmse may be slightly different if we run xgboost model at another time. But it won't affect our conclusion that we improved the performance of xgboost model.
+
+```{r}
+x<- Ftrain%>%
+  filter(dset=="train")%>%
+  dplyr::select(vendor_id, passenger_count, dist, pickup_longitude,
+         pickup_latitude,dropoff_longitude,dropoff_latitude,
+         month,wday,hour,jfk_trip,lg_trip,bearing,
+         freq1,freq2,pinteract,dinteract,interact3, interact4, t_trip, b_trip,
+         avg_temp,has_snow,blizzard,
+         total_travel_time, total_distance,log_duration) 
+x <- model.matrix(~.,data = x)[,-1]
+y <- x[,ncol(x)]
+x <- x[,-ncol(x)]
+
+#################### Train and Test #######################
+#Train and test are similar in distribution. In cases where the outcome is numeric, the samples are split into quartiles and the sampling is done within each quartile
+train_rows <- createDataPartition(y, p = 2/3, list = FALSE) #Improve: instead of using sample
+train_rows <- as.integer(train_rows)
+x.train <- x[train_rows,]
+x.test <- x[-train_rows,]
+
+y.train <- y[train_rows]
+y.test <- y[-train_rows]
+
+dtrain <- xgb.DMatrix(data = x.train, label = y.train)
+dtest <- xgb.DMatrix(data = x.test, label = y.test)
+
+xgb_params <- list(colsample_bytree = 0.7, #variables per tree 
+                   subsample = 0.7, #data subset per tree 
+                   booster = "gbtree",
+                   gamma = 5,
+                   max_depth = 7, #tree levels
+                   eta = 0.3, #shrinkage
+                   eval_metric = "rmse", 
+                   objective = "reg:linear",
+                   seed = 4321
+                   )
+
+parallelStartSocket(cpus = detectCores())
+
+xgb.t <- xgb.train (params = xgb_params, data = dtrain, nrounds = 150, watchlist = list(val=dtest,train=dtrain), print_every_n = 25, maximize = F)
+
+### Check rmse on test data
+pred.t <- predict(xgb.t,x.test)
+RMSE(pred.t,y.test) # 0.3381741
+```
+
+
+
