@@ -18,7 +18,7 @@ author <- function(){
 ```
 
 ***
-## 1 Introduction
+## 1 Backgroud
 
 ### 1.1 Import packages
 ```{r}
@@ -35,7 +35,7 @@ library(tidyverse)
 
 
 ## 1.2 Load data
-The datasets are published on Kaggle by the NYC Taxi and Limousine Commission. There are 1,458,644 observations in the train dataset and 625,134 observations in the test dataset. The train dataset includes 11 variables such as id, vendor_id and so on. Two variables, dropoff_datetime and trip_duration which show up in the train dataset are withheld in the test dataset. Our goal is to predict the trip durations.
+The datasets are published on Kaggle by the NYC Taxi and Limousine Commission. There are 1,458,644 observations in the train dataset and 625,134 observations in the test dataset. The train dataset includes 11 variables such as id, vendor_id and so on. Two variables, dropoff_datetime and trip_duration which show up in the train dataset are withheld in the test dataset. Our goal is to predict the trip durations of the test dataset.
 ```{r}
 train = fread('train_taxi.csv')
 test = fread('test_taxi.csv')
@@ -52,11 +52,15 @@ str(test)
 
 We find:
 
-*vender_id* only takes value 1 and 2, we assume it represents two taxi company.
-*pickup_datetime* and *dropoff_datetime* are both the combination of date and time, which need to be reformated into sperate variables
-*pickup_latitude* and *dropoff_latitude* are not restricted in the New York border (latitude: 40.3371 ~ 41.05555, longitute: -74.4640~-73.4944) as well as *pickup_longitude* and *dropoff_longitude* 
-*store_and_fwd_flag* takes two character as 'N' or 'Y'
-*trip_duration* which is our target variable, has some extreme value: the min value is 1 second and the maximum value 3526282 second $\approx$ 4 days, which are unbelievable.
+*vender_id* only takes value 1 and 2, we assume it represents two taxi company. For example, Yellow Cab and Liberty Taxi could be the two venders.
+
+*pickup_datetime* and *dropoff_datetime* are both the combination of date and time, which need to be reformated into seperate variables so that we can explore the data on the basis of weekdays.
+
+*pickup_latitude* and *dropoff_latitude* indicate the accurate locations of on the map, which are not restricted in the New York border (latitude: 40.3371 ~ 41.05555, longitute: -74.4640~-73.4944) as well as *pickup_longitude* and *dropoff_longitude* 
+
+*store_and_fwd_flag*  indicates whether the trip record was held in vehicle memory before sending to the vendor because the vehicle did not have a connection to the server. It takes two character as 'N' or 'Y'. Y means the trip is stored and forwarded, and N means the trip is not not stored and forwarded.
+
+*trip_duration* is our response variable and its unit is second. We can get the trip_duration by calculating the difference between dropoff_datetime and pickup_datetime. From the descriptive statistics, we find that it has some extreme values: the min value is 1 second and the maximum value is 3526282 seconds approximately 4 days, which are unbelievable. As a result, we need to consider the effects of outliers and influence points.
 
 ## 1.4 missing values
 
