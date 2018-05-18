@@ -27,6 +27,9 @@ library(knitr)
 library(kableExtra)
 library(parallel)
 library(parallelMap) 
+library(glmnet)
+library(mgcv)
+library(readr)
 ```
 
 ```{r}
@@ -652,7 +655,153 @@ x.test <- x[-train_rows,]
 
 y.train <- y[train_rows]
 y.test <- y[-train_rows]
+```
 
+
+The first method used is elastic net regularization. From previous assignment, we know that elastic net performs better than lasso and ridge. So we choose to use elastic net in this case. 
+
+To choose the best fitting alpha, we try the alpha values between 0.1 to 0.9, with 0.1 interval. The table below shows the resulting mean square error corresponding to different alpha values.
+
+In each round, cross validation is applied and the best lambda is chosen from the corresponding minimum mean square error. Then, we extract the minimum mean square errors in each round with different alpha values and compare the difference. The alpha value with the minimum mean square error would be chosen, and the corresponding alpha value would be used as the alpha parameter in elastic net regularization.
+
+Comparing the minimum mean square errors, we could see that the minimum mse is smallest when alpha is 0.3. So we would choose alpha 0.3 as the best fit alpha and plug it into the elastic net model. The RMSE between the predicted test data and the test result is, 0.4741144. 
+
+For comparison reason, we also present the results which derived from lasso and ridge, with alpha = 1 and 0. The final result shows that the RMSE with y training is smallest with elastic net.
+
+```{r}
+#### elastic tuning
+### 不要run
+alpha.seq <- seq(0, 1, 0.1)
+rmse.en <- list(NA)
+mse.min.en <- list(NA)
+for (i in 1:length(alpha.seq)){
+alpha <- alpha.seq[i]
+els.mod.train <- cv.glmnet(x.train, y.train, alpha = alpha,type.measure="mse")
+bestlam_els <- els.mod.train$lambda.min
+mse.min.en[i] <- els.mod.train$cvm[els.mod.train$lambda == bestlam_els]
+}
+
+mse.min.en <- data.frame(mse.min.en)
+colnames(mse.min.en) <- c("alpha0", "alpha0.1","alpha0.2","alpha0.3","alpha0.4","alpha0.5","alpha0.6","alpha0.7","alpha0.8","alpha0.9","alpha1.0")
+```
+
+
+
+
+```{r}
+#### elastic
+els.mod.train <- cv.glmnet(x.train, y.train, alpha = 0.3,type.measure="mse")
+bestlam_els <- els.mod.train$lambda.min
+preds_els <- predict(els.mod.train, s = bestlam_els, newx=x.test)
+rmse.en.0.3  
+
+#### lasso
+lasso.mod.train <- cv.glmnet(x.train, y.train, alpha = 1)
+bestlam_lasso <- lasso.mod.train$lambda.min
+preds_l <- predict(lasso.mod.train, s = bestlam_lasso, newx=x.test)
+RMSE(y.test, preds_l) # 0.46
+
+#### ridge
+ridge.mod.train <- cv.glmnet(x.train, y.train, alpha = 0)
+bestlam_ridge <- ridge.mod.train$lambda.min
+preds_r <- predict(ridge.mod.train, s = bestlam_ridge, newx=x.test)
+RMSE(y.test, preds_r) # 0.4789906
+
+plot(els.mod.train,xvar="lambda",label=TRUE)
+plot(lasso.mod.train,xvar="lambda",label=TRUE)
+plot(ridge.mod.train,xvar="lambda",label=TRUE)
+```
+
+#### bam
+Package bam is a R package which works as an extension of the generalized additive mdel (GAM). Bam is more efficient when dealing with large dataset and could consider the nonlinear situations as well. The degree of smoothness of model terms is estimated as part of fitting. K is treated as tuning paratmeter here that the changing value of K would affect the RMSE. The K is smallest when k is set to be 19. So we chose this k value to train the dataset, and the RMSE is 0.3730082.
+```{r}
+data.bam <- Ftrain%>%
+  filter(dset=="train")%>%
+  dplyr::select(vendor_id, passenger_count, dist, pickup_longitude,
+         pickup_latitude,dropoff_longitude,dropoff_latitude,
+         month,wday,hour,jfk_trip,lg_trip,bearing,
+         freq1,freq2,pinteract,dinteract,interact3, interact4, t_trip, b_trip,
+         avg_temp,has_snow,blizzard,
+         total_travel_time, total_distance,log_duration) 
+data.bam <- data.bam %>%
+  mutate(vendor_id = as.logical(vendor_id),
+         passenger_count = as.logical(passenger_count),
+         month = as.logical(month),
+         wday = as.logical(wday),
+         hour = as.numeric(hour))
+
+bam.train <- data.bam[train_rows,]
+bam.test <- data.bam[-train_rows,]
+
+bam.test.y <- bam.test$log_duration
+bam.test.x <- bam.test[,-24]
+```
+
+
+```{r, eval = FALSE}
+k.seq <- seq(5,20,2)
+rmse.bam <- list(NA)
+for (i in 1:length(k.seq)){
+set.seed(3)
+bs <- "cr"; k <- k.seq[i]
+b <- bam(log_duration ~ s(dist,bs=bs,k=k)
+                        +s(pickup_longitude,bs=bs,k=k)
+                        +s(pickup_latitude,bs=bs,k=k)
+                        +s(dropoff_longitude,bs=bs,k=k)
+                        +s(dropoff_latitude,bs=bs,k=k)
+                        +s(hour, bs=bs)
+                        +s(bearing, bs=bs)
+                        +s(pinteract,bs=bs,k=k)
+                        +s(dinteract,bs=bs,k=k)
+                        +s(interact3,bs=bs,k=k)
+                        +s(interact4,bs=bs,k=k)
+                        +s(avg_temp,bs=bs,k=k)
+                        +s(total_travel_time,bs=bs,k=k)
+                        +s(total_distance,bs=bs,k=k)
+                        , data = bam.train)
+ bam.pred <- predict.bam(b, bam.test.x )
+ rmse <- RMSE(bam.test.y, bam.pred)
+ rmse.bam[i] <- rmse
+}
+
+
+
+rmse.bam.df <- data.frame(rmse.bam)
+colnames(rmse.bam.df) <- c("k=5","k=7","k=9","k=11","k=13","k=15","k=17","k=19")
+rownames(rmse.bam.df) <- c("rmse")
+
+
+```
+
+
+```{r}
+bs <- "cr"; k <- 19
+b <- bam(log_duration ~ s(dist,bs=bs,k=k)
+                        +s(pickup_longitude,bs=bs,k=k)
+                        +s(pickup_latitude,bs=bs,k=k)
+                        +s(dropoff_longitude,bs=bs,k=k)
+                        +s(dropoff_latitude,bs=bs,k=k)
+                        +s(hour, bs=bs)
+                        +s(bearing, bs=bs)
+                        +s(pinteract,bs=bs,k=k)
+                        +s(dinteract,bs=bs,k=k)
+                        +s(interact3,bs=bs,k=k)
+                        +s(interact4,bs=bs,k=k)
+                        +s(avg_temp,bs=bs,k=k)
+                        +s(total_travel_time,bs=bs,k=k)
+                        +s(total_distance,bs=bs,k=k)
+                        , data = bam.train)
+ bam.pred <- predict.bam(b, bam.test.x )
+ rmse <- RMSE(bam.test.y, bam.pred)
+ rmse
+
+ plot(b,pages=1,rug=FALSE,seWithMean=TRUE)
+
+```
+
+
+
+```{r}
 dtrain <- xgb.DMatrix(data = x.train, label = y.train)
 dtest <- xgb.DMatrix(data = x.test, label = y.test)
 
@@ -675,6 +824,95 @@ xgb.t <- xgb.train (params = xgb_params, data = dtrain, nrounds = 150, watchlist
 pred.t <- predict(xgb.t,x.test)
 RMSE(pred.t,y.test) # 0.3381741
 ```
+
+
+#### bam
+Package bam is a R package which works as an extension of the generalized additive mdel (GAM). Bam is more efficient when dealing with large dataset and could consider the nonlinear situations as well. The degree of smoothness of model terms is estimated as part of fitting. K is treated as tuning paratmeter here that the changing value of K would affect the RMSE. The K is smallest when k is set to be 19. So we chose this k value to train the dataset, and the RMSE is 0.3730082.
+
+
+```{r}
+data.bam <- Ftrain%>%
+  filter(dset=="train")%>%
+  dplyr::select(vendor_id, passenger_count, dist, pickup_longitude,
+         pickup_latitude,dropoff_longitude,dropoff_latitude,
+         month,wday,hour,jfk_trip,lg_trip,bearing,
+         freq1,freq2,pinteract,dinteract,interact3, interact4, t_trip, b_trip,
+         avg_temp,has_snow,blizzard,
+         total_travel_time, total_distance,log_duration) 
+data.bam <- data.bam %>%
+  mutate(vendor_id = as.logical(vendor_id),
+         passenger_count = as.logical(passenger_count),
+         month = as.logical(month),
+         wday = as.logical(wday),
+         hour = as.numeric(hour))
+
+bam.train <- data.bam[train_rows,]
+bam.test <- data.bam[-train_rows,]
+
+bam.test.y <- bam.test$log_duration
+bam.test.x <- bam.test[,-24]
+
+k.seq <- seq(5,20,2)
+rmse.bam <- list(NA)
+for (i in 1:length(k.seq)){
+set.seed(3)
+bs <- "cr"; k <- k.seq[i]
+b <- bam(log_duration ~ s(dist,bs=bs,k=k)
+                        +s(pickup_longitude,bs=bs,k=k)
+                        +s(pickup_latitude,bs=bs,k=k)
+                        +s(dropoff_longitude,bs=bs,k=k)
+                        +s(dropoff_latitude,bs=bs,k=k)
+                        +s(hour, bs=bs)
+                        +s(bearing, bs=bs)
+                        +s(pinteract,bs=bs,k=k)
+                        +s(dinteract,bs=bs,k=k)
+                        +s(interact3,bs=bs,k=k)
+                        +s(interact4,bs=bs,k=k)
+                        +s(avg_temp,bs=bs,k=k)
+                        +s(total_travel_time,bs=bs,k=k)
+                        +s(total_distance,bs=bs,k=k)
+                        , data = bam.train)
+ bam.pred <- predict.bam(b, bam.test.x )
+ rmse <- RMSE(bam.test.y, bam.pred)
+ rmse.bam[i] <- rmse
+}
+
+
+
+rmse.bam.df <- data.frame(rmse.bam)
+colnames(rmse.bam.df) <- c("k=5","k=7","k=9","k=11","k=13","k=15","k=17","k=19")
+rownames(rmse.bam.df) <- c("rmse")
+
+
+```
+
+```{r}
+xgb <- xgboost(data = x, label = y, nrounds = 150,eta=0.3, gamma=5, max_depth=7, subsample=0.7, colsample_bytree=0.7, objective = "reg:linear", eval_metric = "rmse",print_every_n = 25)
+
+x.pred<- Ftrain%>%
+  filter(dset=="test")%>%
+  dplyr::select(vendor_id, passenger_count, dist, pickup_longitude,
+         pickup_latitude,dropoff_longitude,dropoff_latitude,
+         month,wday,hour,jfk_trip,lg_trip,bearing,
+         freq1,freq2,pinteract,dinteract,interact3, interact4, t_trip, b_trip,
+         avg_temp,has_snow,blizzard,
+         total_travel_time, total_distance) 
+x.pred <- model.matrix(~.,data = x.pred)[,-1]
+
+pred.xgb <- predict(xgb,x.pred)
+pred.trip.duration <- exp(pred.xgb) -1
+
+id.test <- Ftrain %>%
+  filter(dset == "test") %>%
+  dplyr::select(id)
+
+submission <- cbind(id.test, pred.trip.duration)
+colnames(submission) <- c("id", "trip_duration")
+
+write_csv(submission,'submission.csv',col_names = T)
+
+```
+
 
 
 
